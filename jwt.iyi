@@ -1,0 +1,156 @@
+# JSON Web Tokens (RFC 7519) for iyi, after crystal-community/jwt
+# (https://github.com/crystal-community/jwt): signed with HMAC, RSA,
+# RSA-PSS, ECDSA or Ed25519, decoded with their signature verified and
+# their registered claims checked. Written in iyi, with no dependency
+# outside iyi's own library.
+#
+# ```
+# import jwt
+# import jwt/jwt/algorithms::{Algorithm}
+#
+# token = Jwt.encode({"foo" => "bar"}, "SecretKey", Algorithm::HS256)!
+# decoded = Jwt.decode(token, "SecretKey", Algorithm::HS256)!
+# decoded.payload["foo"].as_s # => "bar"
+# ```
+module jwt
+
+pub import jwt/algorithms
+pub import jwt/errors
+
+import std/json::{Any, JSON}
+import std/text
+import std/time::{Time}
+import jwt/algorithms::{Algorithm}
+import jwt/base64url::{Base64Url}
+import jwt/validation::{Claims}
+import jwt/errors::{DecodeError, EncodeError, Failure, VerificationError}
+import jwt/signatures::{Signer}
+
+pub VERSION = "0.1.0"
+
+# A decoded token: its JOSE header and its claims, each the JSON object
+# the token carried.
+pub struct Token
+  getter header : Hash(String, Any)
+  getter payload : Hash(String, Any)
+
+  def initialize(@header : Hash(String, Any), @payload : Hash(String, Any))
+  end
+end
+
+# *payload* - anything `JSON.to_json` writes as an object: a `Hash(String,
+# V)`, an `Any`, a type that derives `serializable` - signed with *key*
+# under *algorithm*. The header is `{"typ":"JWT","alg":...}`.
+#
+# *key* is the HMAC secret for HS*; a PEM private key for RS*, PS* and
+# ES256; for EdDSA the 32-byte seed in hex, or a PKCS #8 PEM key.
+pub def encode(payload : T, key : String, algorithm : Algorithm) : String | EncodeError forall T
+  encode(payload, key, algorithm, {} of String => String)
+end
+
+# As `encode` above, with *header*'s parameters in the header too: a `kid`,
+# a `typ` in place of `JWT`. An `alg` in it is passed over, since the
+# algorithm the token is signed with is the one the header names.
+pub def encode(payload : T, key : String, algorithm : Algorithm, header : Hash(String, V)) : String | EncodeError forall T, V
+  claims = JSON.to_json(payload)
+  raise "a JWT payload is a JSON object, and this one is written #{claims[0, 20].inspect}..." unless claims.starts_with?('{')
+  head = JSON.build do |json|
+    json.object do
+      json.field("typ")
+      if header.has_key?("typ")
+        JSON.write_value(header["typ"], json)
+      else
+        json.string("JWT")
+      end
+      json.field("alg", algorithm.jose_name)
+      header.each do |name, value|
+        unless name == "typ" || name == "alg"
+          json.field(name)
+          JSON.write_value(value, json)
+        end
+      end
+    end
+  end
+  signing_input = Base64Url.encode(head) + "." + Base64Url.encode(claims)
+  signing_input + "." + Base64Url.encode(Signer.sign(algorithm, key, signing_input)!)
+end
+
+# *token*'s header and payload, once its signature is *key*'s under
+# *algorithm*. The header has to name *algorithm* too: the algorithm is
+# the caller's choice, never the token's.
+#
+# When *validate* is true, an `exp` in the past or an `nbf` in the future
+# refuses the token, and *aud*, *iss* and *sub*, when given, have to match
+# their claims. *typ*, when given, has to match the header's, ignoring case.
+#
+# *key* is the HMAC secret for HS*; a PEM public key for RS*, PS* and ES*
+# (or the private key, whose public half is used); for EdDSA the public key
+# in hex or a PEM public key.
+pub def decode(token : String, key : String, algorithm : Algorithm, validate : Bool = true,
+               aud : String? = nil, iss : String? = nil, sub : String? = nil, typ : String? = nil) : Token | Failure
+  decode(token, algorithm, validate, aud, iss, sub, typ) { |header, payload| key }
+end
+
+# As `decode` above, with the key the block answers for the token's header
+# and payload - picked by its `kid`, say. A block that answers nil refuses
+# the token with a `VerificationError`. The header and the payload reach
+# the block unverified.
+pub def decode(token : String, algorithm : Algorithm, validate : Bool = true,
+               aud : String? = nil, iss : String? = nil, sub : String? = nil, typ : String? = nil,
+               & : Hash(String, Any), Hash(String, Any) -> String?) : Token | Failure
+  segments = token.split('.')
+  unless segments.size == 3
+    return DecodeError.new("Invalid number of segments in the token. Expected 3 got #{segments.size}")
+  end
+  decoded = read_segments(segments[0], segments[1])!
+  alg = decoded.header["alg"]?
+  named = alg ? alg.as_s? : nil
+  return DecodeError.new("Invalid alg in JWT header") unless named
+  unless named == algorithm.jose_name
+    return VerificationError.new("Algorithm mismatch: the token is signed with #{named}, expected #{algorithm.jose_name}")
+  end
+  signature = Base64Url.decode_bytes(segments[2])
+  return DecodeError.new("Invalid Base64 in the signature") unless signature
+  key = yield decoded.header, decoded.payload
+  return VerificationError.new("No key for the token") unless key
+  unless Signer.verify(algorithm, key, segments[0] + "." + segments[1], signature)!
+    return VerificationError.new("Signature verification failed")
+  end
+  if expected = typ
+    Claims.check_type(decoded.header, expected)!
+  end
+  Claims.validate(decoded.payload, Time.utc.to_unix_f, aud, iss, sub)! if validate
+  decoded
+end
+
+# *token*'s header and payload with nothing checked: neither the signature
+# nor a claim. For reading a token's `kid` or `iss` before choosing how to
+# verify it, and never for trusting it.
+pub def decode_unverified(token : String) : Token | DecodeError
+  segments = token.split('.')
+  unless segments.size == 3
+    return DecodeError.new("Invalid number of segments in the token. Expected 3 got #{segments.size}")
+  end
+  read_segments(segments[0], segments[1])
+end
+
+# The header and payload segments read: each unpadded base64url of a JSON
+# object. A header with `crit` is refused, as RFC 7515 §4.1.11 asks of a
+# reader that implements none of the extensions it could name.
+def read_segments(header_segment : String, payload_segment : String) : Token | DecodeError
+  header = json_object(header_segment, "header")!
+  if header.has_key?("crit")
+    return DecodeError.new("Unsupported critical header parameters: #{header["crit"].to_json}")
+  end
+  Token.new(header, json_object(payload_segment, "payload")!)
+end
+
+def json_object(segment : String, what : String) : Hash(String, Any) | DecodeError
+  text = Base64Url.decode(segment)
+  return DecodeError.new("Invalid Base64 in the #{what}") unless text
+  value = JSON.parse?(text)
+  return DecodeError.new("Invalid JSON in the #{what}") unless value
+  object = value.as_h?
+  return DecodeError.new("Invalid JWT #{what}: expected a JSON object, got #{value.kind}") unless object
+  object
+end

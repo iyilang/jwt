@@ -1,0 +1,129 @@
+# `encode`, `decode` and `decode_unverified`, over HMAC and `none`: the
+# token's shape, its header, and what a decoder refuses before any claim.
+# The HMAC tokens are crystal-community/jwt's own spec vectors.
+module jwt_test
+
+import std/json::{Any}
+import jwt
+import jwt/algorithms::{Algorithm}
+import jwt/base64url::{Base64Url}
+import jwt/errors::{DecodeError, VerificationError}
+
+PAYLOAD = {"foo" => "bar"}
+
+def header_json(token : String) : String
+  Base64Url.decode(token.split('.')[0]) || ""
+end
+
+test "HMAC tokens are crystal-community/jwt's, byte for byte, and decode" do
+  vectors = {
+    Algorithm::HS256 => "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJmb28iOiJiYXIifQ.JrpaO9b4_55fVBXe8LgOIkKBTjSE7-pqm5pfzh9wzOM",
+    Algorithm::HS384 => "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzM4NCJ9.eyJmb28iOiJiYXIifQ.l7UMuFdyQGfcI06CfxK9xk7NmGbRShs7IDdQ5qVi8MXlaCn1o6WEQyJTduOEbPhp",
+    Algorithm::HS512 => "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJmb28iOiJiYXIifQ.cuIGPzgyhGTXJzO7FojzjcH7wZDc2005e1MChS-5KJOo1ON4g_k3ZSyxcKiE7rK8VJuVnL7X7EM2GQG2mVgOxQ",
+  }
+  vectors.each do |algorithm, expected|
+    token = Jwt.encode(PAYLOAD, "$ecretKey", algorithm).or_panic
+    assert_eq expected, token
+    decoded = Jwt.decode(token, "$ecretKey", algorithm).or_panic
+    assert_eq "bar", decoded.payload["foo"].as_s
+    assert_eq "JWT", decoded.header["typ"].as_s
+    assert_eq algorithm.to_s, decoded.header["alg"].as_s
+    assert_eq 2, decoded.header.size
+  end
+  token = Jwt.encode({"k1" => "v1", "k2" => "v2"}, "SecretKey", Algorithm::HS256).or_panic
+  assert_eq "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJrMSI6InYxIiwiazIiOiJ2MiJ9.spzfy63YQSKdoM3av9HHvLtWzFjPd1hbch2g3T1-nu4", token
+end
+
+test "another key's signature is refused" do
+  [Algorithm::HS256, Algorithm::HS384, Algorithm::HS512].each do |algorithm|
+    token = Jwt.encode(PAYLOAD, "WrongKey", algorithm).or_panic
+    refusal = assert_error(VerificationError) { Jwt.decode(token, "$ecretKey", algorithm) }
+    assert_eq "Signature verification failed", refusal.message
+  end
+end
+
+test "the algorithm is the caller's, never the token's" do
+  hs = Jwt.encode(PAYLOAD, "$ecretKey", Algorithm::HS256).or_panic
+  refusal = assert_error(VerificationError) { Jwt.decode(hs, "$ecretKey", Algorithm::HS512) }
+  assert_eq "Algorithm mismatch: the token is signed with HS256, expected HS512", refusal.message
+  # An unsigned token offered to a decoder expecting a signature.
+  unsigned = Jwt.encode(PAYLOAD, "", Algorithm::None).or_panic
+  assert_error(VerificationError) { Jwt.decode(unsigned, "$ecretKey", Algorithm::HS256) }
+  # A signed token's header rewritten to `none`, its signature dropped.
+  forged = Base64Url.encode(%({"alg":"none"})) + "." + hs.split('.')[1] + "."
+  assert_error(VerificationError) { Jwt.decode(forged, "$ecretKey", Algorithm::HS256) }
+  # `alg` is case-sensitive.
+  lower = Base64Url.encode(%({"alg":"hs256"})) + "." + hs.split('.')[1] + "." + hs.split('.')[2]
+  assert_error(VerificationError) { Jwt.decode(lower, "$ecretKey", Algorithm::HS256) }
+end
+
+test "none signs nothing, and verifies only nothing" do
+  token = Jwt.encode(PAYLOAD, "$ecretKey", Algorithm::None).or_panic
+  assert_eq "eyJ0eXAiOiJKV1QiLCJhbGciOiJub25lIn0.eyJmb28iOiJiYXIifQ.", token
+  assert_eq "none", Jwt.decode(token, "", Algorithm::None).or_panic.header["alg"].as_s
+  hs = Jwt.encode(PAYLOAD, "$ecretKey", Algorithm::HS256).or_panic
+  signed = Base64Url.encode(%({"alg":"none"})) + "." + hs.split('.')[1] + "." + hs.split('.')[2]
+  refusal = assert_error(VerificationError) { Jwt.decode(signed, "", Algorithm::None) }
+  assert_eq "Signature verification failed", refusal.message
+end
+
+test "a token that is not three segments of base64url JSON objects" do
+  ["e30", "e30.e30", "e30.e30.e30.e30"].each do |text|
+    refusal = assert_error(DecodeError) { Jwt.decode(text, "$ecretKey", Algorithm::HS256) }
+    assert_includes refusal.message, "Invalid number of segments"
+    assert_error(DecodeError) { Jwt.decode_unverified(text) }
+  end
+  payload = Base64Url.encode(%({"foo":"bar"}))
+  header = Base64Url.encode(%({"alg":"HS256"}))
+  assert_eq "Invalid Base64 in the header", assert_error(DecodeError) { Jwt.decode("e30=.#{payload}.", "k", Algorithm::HS256) }.message
+  assert_eq "Invalid JSON in the payload", assert_error(DecodeError) { Jwt.decode("#{header}.#{Base64Url.encode("{")}.", "k", Algorithm::HS256) }.message
+  assert_eq "Invalid JWT payload: expected a JSON object, got array", assert_error(DecodeError) { Jwt.decode("#{header}.#{Base64Url.encode("[1]")}.", "k", Algorithm::HS256) }.message
+  assert_eq "Invalid JWT header: expected a JSON object, got string", assert_error(DecodeError) { Jwt.decode("#{Base64Url.encode(%("HS256"))}.#{payload}.", "k", Algorithm::HS256) }.message
+  assert_eq "Invalid alg in JWT header", assert_error(DecodeError) { Jwt.decode("#{Base64Url.encode(%({"alg":1}))}.#{payload}.", "k", Algorithm::HS256) }.message
+  assert_eq "Invalid Base64 in the signature", assert_error(DecodeError) { Jwt.decode("#{header}.#{payload}.a+b", "k", Algorithm::HS256) }.message
+end
+
+test "a critical header extension is refused, signed or not" do
+  token = Jwt.encode(PAYLOAD, "k", Algorithm::HS256, {"crit" => ["exp"]}).or_panic
+  refusal = assert_error(DecodeError) { Jwt.decode(token, "k", Algorithm::HS256) }
+  assert_eq %(Unsupported critical header parameters: ["exp"]), refusal.message
+  assert_error(DecodeError) { Jwt.decode_unverified(token) }
+end
+
+test "header parameters: added after typ and alg, typ replaced, alg kept" do
+  token = Jwt.encode(PAYLOAD, "k", Algorithm::HS256, {"kid" => "key-1", "alg" => "none"}).or_panic
+  assert_eq %({"typ":"JWT","alg":"HS256","kid":"key-1"}), header_json(token)
+  token = Jwt.encode(PAYLOAD, "k", Algorithm::HS256, {"cty" => "JWT", "typ" => "at+jwt"}).or_panic
+  assert_eq %({"typ":"at+jwt","alg":"HS256","cty":"JWT"}), header_json(token)
+  assert_eq "key-1", Jwt.decode_unverified(Jwt.encode(PAYLOAD, "k", Algorithm::HS256, {"kid" => "key-1"}).or_panic).or_panic.header["kid"].as_s
+end
+
+test "the payload is any JSON object, nested values kept" do
+  payload = {"name" => Any.new("Sergey"), "admin" => Any.new(true), "n" => Any.new(3_i64),
+             "roles" => Any.new([Any.new("a"), Any.new("b")])}
+  token = Jwt.encode(payload, "k", Algorithm::HS512).or_panic
+  decoded = Jwt.decode(token, "k", Algorithm::HS512).or_panic
+  assert_eq payload, decoded.payload
+end
+
+test "the block chooses the key from the unverified header" do
+  keys = {"a" => "secret-a", "b" => "secret-b"}
+  token = Jwt.encode(PAYLOAD, "secret-b", Algorithm::HS256, {"kid" => "b"}).or_panic
+  decoded = Jwt.decode(token, Algorithm::HS256) do |header, payload|
+    assert_eq "bar", payload["foo"].as_s
+    keys[header["kid"].as_s]?
+  end
+  assert_eq "b", decoded.or_panic.header["kid"].as_s
+  unknown = Jwt.encode(PAYLOAD, "secret-c", Algorithm::HS256, {"kid" => "c"}).or_panic
+  refusal = assert_error(VerificationError) do
+    Jwt.decode(unknown, Algorithm::HS256) { |header, payload| keys[header["kid"].as_s]? }
+  end
+  assert_eq "No key for the token", refusal.message
+end
+
+test "decode_unverified reads a token whatever signed it" do
+  token = Jwt.encode(PAYLOAD, "WrongKey", Algorithm::HS384).or_panic
+  decoded = Jwt.decode_unverified(token).or_panic
+  assert_eq "bar", decoded.payload["foo"].as_s
+  assert_eq "HS384", decoded.header["alg"].as_s
+end
