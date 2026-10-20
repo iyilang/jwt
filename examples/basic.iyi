@@ -1,0 +1,37 @@
+# Signing a token, decoding it with its claims checked, and telling the
+# failures apart: `iyi run examples/basic.iyi`.
+module examples/basic
+
+import std/json::{Any}
+import std/time::{Time}
+import jwt
+import jwt/algorithms::{Algorithm}
+import jwt/errors::{ExpiredSignatureError, Failure, VerificationError}
+
+def run : Nil | Failure
+  claims = {"sub" => Any.new("42"), "aud" => Any.new("api"), "exp" => Any.new(Time.utc.to_unix + 60)}
+  token = Jwt.encode(claims, "SecretKey", Algorithm::HS256, {"kid" => "2026-10"})!
+  puts token
+
+  decoded = Jwt.decode(token, "SecretKey", Algorithm::HS256, aud: "api")!
+  puts "sub #{decoded.payload["sub"].as_s}, kid #{decoded.header["kid"].as_s}"
+
+  case result = Jwt.decode(token, "WrongKey", Algorithm::HS256)
+  in Jwt::Token        then puts "accepted"
+  in VerificationError then puts "refused: #{result.message}"
+  in Failure           then puts "refused otherwise: #{result.message}"
+  end
+
+  stale = Jwt.encode({"exp" => Time.utc.to_unix - 1}, "SecretKey", Algorithm::HS256)!
+  case result = Jwt.decode(stale, "SecretKey", Algorithm::HS256)
+  in ExpiredSignatureError then puts "expired: #{result.message}"
+  in Jwt::Token            then puts "accepted"
+  in Failure               then puts "refused otherwise: #{result.message}"
+  end
+  nil
+end
+
+case result = run
+in Nil     then puts "done"
+in Failure then puts "failed: #{result.message}"
+end
