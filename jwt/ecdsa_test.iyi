@@ -1,0 +1,159 @@
+# ES256, ES384 and ES512: crystal-community/jwt's example tokens verify
+# with their keys, ES256 signs, and a JWS signature is r and s side by side
+# where std/ecdsa reads DER.
+module jwt/ecdsa_test
+
+import jwt
+import jwt/algorithms::{Algorithm}
+import jwt/base64url::{Base64Url}
+import jwt/errors::{InvalidKeyError, UnsupportedAlgorithmError, VerificationError}
+import jwt/signatures::{Signer}
+
+# crystal-community/jwt's spec keys and the tokens it signed with them, and
+# each key's public half from `openssl ec -pubout`.
+P256_PRIVATE = <<-PEM
+  -----BEGIN EC PRIVATE KEY-----
+  MHcCAQEEICQ13objo8V5wNl7ioToptpI6nJ2fvNcy+fgWQ2BrzgnoAoGCCqGSM49
+  AwEHoUQDQgAEUeAfjUi57m5PZ7UEiaBLUzex/Jsq0l+dC5XixCUe01qqZJ3vFe7e
+  zVdalVZaibmLJQ2VUgPRTrlT2yv462U6xg==
+  -----END EC PRIVATE KEY-----
+  PEM
+
+P256_PUBLIC = <<-PEM
+  -----BEGIN PUBLIC KEY-----
+  MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEUeAfjUi57m5PZ7UEiaBLUzex/Jsq
+  0l+dC5XixCUe01qqZJ3vFe7ezVdalVZaibmLJQ2VUgPRTrlT2yv462U6xg==
+  -----END PUBLIC KEY-----
+  PEM
+
+P256_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiJ9.eyJmb28iOiJiYXIifQ.FG1b5ByP6eIoXsXvrdTpjP4fwGWOj1qxeyPkxyXulsPYUYVor5Va8uSGUkrn41lUrR9gC1LiwnY1XPXEC_CDsA"
+
+P384_PRIVATE = <<-PEM
+  -----BEGIN EC PRIVATE KEY-----
+  MIGkAgEBBDBfbYWrSPvOC+KI7viJp4p0ZDu225CMXqzZ6psAja5JOur6kPU2Bj+1
+  mE0qtiXaVgGgBwYFK4EEACKhZANiAAQG0H1oa1HMsWVXKL8pi7PqrfY3QYnh5qRg
+  bIZkFLnnOikYnfy4+C4ldfja4Q1Sol2nnsQFntbkK0LMDwuJfh1hF9qUDyUnWNcZ
+  Evgh9T/ee7vu8MwVeAfqVHhby7xlCnk=
+  -----END EC PRIVATE KEY-----
+  PEM
+
+P384_PUBLIC = <<-PEM
+  -----BEGIN PUBLIC KEY-----
+  MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEBtB9aGtRzLFlVyi/KYuz6q32N0GJ4eak
+  YGyGZBS55zopGJ38uPguJXX42uENUqJdp57EBZ7W5CtCzA8LiX4dYRfalA8lJ1jX
+  GRL4IfU/3nu77vDMFXgH6lR4W8u8ZQp5
+  -----END PUBLIC KEY-----
+  PEM
+
+P384_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzM4NCJ9.eyJmb28iOiJiYXIifQ.Gpkkby0V5KBrpi09bQxgs2CDs-joh8RL1fmVhd-sAgUplJZS1-IwsFAh2-si7Mcf9RIp4OKA3QaMICYut3Or3ewj5rYuwOw4qhBUITYPveBgXhPknM_svg2Le44ZL1Zx"
+
+P521_PRIVATE = <<-PEM
+  -----BEGIN EC PRIVATE KEY-----
+  MIHcAgEBBEIBUqevSmQr97G1/QaHaORzABsXB7oFH9kQ3ofpzyDWRMuoUAO1yuKU
+  XDLvv6K2bla/6Jjajs0iaFtYfjQkELmquPqgBwYFK4EEACOhgYkDgYYABADKd6je
+  zsb/nsKV2Fgftt+uzKGFTiq9QD2jvo/xbwEKO/JMc9okIO6S2D8PxvtaM8V5uWa/
+  36XJ4ZqYMFyT4r6SFQCJ+0zfMTvZWiLZxSoPaUhd/amPe5NBM3qy2qdNBXjW8SW4
+  r8wUDIQIjFY3yId6nm7UoILcWV2DfH9zG2ZlaRuivg==
+  -----END EC PRIVATE KEY-----
+  PEM
+
+P521_PUBLIC = <<-PEM
+  -----BEGIN PUBLIC KEY-----
+  MIGbMBAGByqGSM49AgEGBSuBBAAjA4GGAAQAyneo3s7G/57CldhYH7bfrsyhhU4q
+  vUA9o76P8W8BCjvyTHPaJCDuktg/D8b7WjPFeblmv9+lyeGamDBck+K+khUAiftM
+  3zE72Voi2cUqD2lIXf2pj3uTQTN6stqnTQV41vEluK/MFAyECIxWN8iHep5u1KCC
+  3Fldg3x/cxtmZWkbor4=
+  -----END PUBLIC KEY-----
+  PEM
+
+P521_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzUxMiJ9.eyJmb28iOiJiYXIifQ.AeXp0TWi_GK76s0Skjltw5a03EjmwndrBCGld4aOATastK7WAymbHIfXSJW6G5YhHYQ0N8unnWKQtr1SGUsAntiIARbP_dEaYvdmZu_5ypZ_fhxCymRYQ0hIxRNVclxdEGO9P6ckBRXtGfyCEGyBr3Czn6fogCrfRe0epUvyNRWUvuNH"
+
+# Another P-256 key, PKCS #8 (`openssl pkcs8 -topk8 -nocrypt`), and its
+# public half.
+OTHER_PRIVATE = <<-PEM
+  -----BEGIN EC PRIVATE KEY-----
+  MHcCAQEEIBk+7qAtkmubz1ENCirnccTXGi80aBLAIFs6vfENM6UloAoGCCqGSM49
+  AwEHoUQDQgAEWWXgyR0aVz57hI6egnz/BshXtVr4JepP4YIPbfUZA2xc32I6fKkQ
+  HBFzGX4At7PHVOp1FEbzR4BvibEGJRjnQA==
+  -----END EC PRIVATE KEY-----
+  PEM
+
+OTHER_PUBLIC = <<-PEM
+  -----BEGIN PUBLIC KEY-----
+  MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEWWXgyR0aVz57hI6egnz/BshXtVr4
+  JepP4YIPbfUZA2xc32I6fKkQHBFzGX4At7PHVOp1FEbzR4BvibEGJRjnQA==
+  -----END PUBLIC KEY-----
+  PEM
+
+test "crystal-community/jwt's tokens verify with the public key and with the private key" do
+  [{Algorithm::ES256, P256_TOKEN, P256_PUBLIC, P256_PRIVATE},
+   {Algorithm::ES384, P384_TOKEN, P384_PUBLIC, P384_PRIVATE},
+   {Algorithm::ES512, P521_TOKEN, P521_PUBLIC, P521_PRIVATE}].each do |vector|
+    algorithm, token, public_key, private_key = vector
+    [public_key, private_key].each do |key|
+      decoded = Jwt.decode(token, key, algorithm).or_panic
+      assert_eq "bar", decoded.payload["foo"].as_s
+      assert_eq algorithm.to_s, decoded.header["alg"].as_s
+    end
+  end
+end
+
+test "a raw signature is DER's r and s, crystal-community/jwt's vector" do
+  signature = Base64Url.decode_bytes(P256_TOKEN.split('.')[2]) || [] of UInt8
+  expected = [48, 69, 2, 32, 20, 109, 91, 228, 28, 143, 233, 226, 40, 94, 197,
+              239, 173, 212, 233, 140, 254, 31, 192, 101, 142, 143, 90, 177, 123,
+              35, 228, 199, 37, 238, 150, 195, 2, 33, 0, 216, 81, 133, 104, 175,
+              149, 90, 242, 228, 134, 82, 74, 231, 227, 89, 84, 173, 31, 96, 11, 82,
+              226, 194, 118, 53, 92, 245, 196, 11, 240, 131, 176].map(&.to_u8)
+  der = Signer.raw_to_der(signature)
+  assert_eq expected, der
+  assert_eq signature, Signer.der_to_raw(der, 32).or_panic
+end
+
+test "P-521's 66-byte halves take DER's long length form, and leading zeros come back" do
+  signature = Base64Url.decode_bytes(P521_TOKEN.split('.')[2]) || [] of UInt8
+  assert_eq 132, signature.size
+  der = Signer.raw_to_der(signature)
+  assert_eq [0x30_u8, 0x81_u8], der[0, 2]
+  assert_eq signature, Signer.der_to_raw(der, 66).or_panic
+  zeros = Array(UInt8).new(64, 0_u8)
+  zeros[31] = 1_u8
+  zeros[32] = 0x80_u8
+  assert_eq [0x30_u8, 38_u8, 2_u8, 1_u8, 1_u8, 2_u8, 33_u8, 0_u8, 0x80_u8], Signer.raw_to_der(zeros)[0, 9]
+  assert_eq zeros, Signer.der_to_raw(Signer.raw_to_der(zeros), 32).or_panic
+end
+
+test "ES256 signs with a SEC 1 or a PKCS #8 key, and the token verifies" do
+  pkcs8 = <<-PEM
+    -----BEGIN PRIVATE KEY-----
+    MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgGT7uoC2Sa5vPUQ0K
+    KudxxNcaLzRoEsAgWzq98Q0zpSWhRANCAARZZeDJHRpXPnuEjp6CfP8GyFe1Wvgl
+    6k/hgg9t9RkDbFzfYjp8qRAcEXMZfgC3s8dU6nUURvNHgG+JsQYlGOdA
+    -----END PRIVATE KEY-----
+    PEM
+  [OTHER_PRIVATE, pkcs8].each do |key|
+    token = Jwt.encode({"foo" => "bar"}, key, Algorithm::ES256).or_panic
+    assert_eq 86, token.split('.')[2].bytesize
+    assert_eq "bar", Jwt.decode(token, OTHER_PUBLIC, Algorithm::ES256).or_panic.payload["foo"].as_s
+    assert_eq "bar", Jwt.decode(token, pkcs8, Algorithm::ES256).or_panic.payload["foo"].as_s
+  end
+end
+
+test "ES384 and ES512 verify only" do
+  [{Algorithm::ES384, P384_PRIVATE}, {Algorithm::ES512, P521_PRIVATE}].each do |pair|
+    algorithm, key = pair
+    refusal = assert_error(UnsupportedAlgorithmError) { Jwt.encode({"foo" => "bar"}, key, algorithm) }
+    assert_includes refusal.message, "verifies but does not sign"
+  end
+end
+
+test "another key, another curve, a signature of the wrong size" do
+  refusal = assert_error(VerificationError) { Jwt.decode(P256_TOKEN, OTHER_PUBLIC, Algorithm::ES256) }
+  assert_eq "Signature verification failed", refusal.message
+  curve = assert_error(InvalidKeyError) { Jwt.decode(P384_TOKEN, P256_PUBLIC, Algorithm::ES384) }
+  assert_eq "an EC key on P256, where the algorithm takes P384", curve.message
+  assert_error(InvalidKeyError) { Jwt.decode(P256_TOKEN, "secret", Algorithm::ES256) }
+  parts = P256_TOKEN.split('.')
+  short = "#{parts[0]}.#{parts[1]}.#{parts[2][0, 84]}"
+  assert_error(VerificationError) { Jwt.decode(short, P256_PUBLIC, Algorithm::ES256) }
+end

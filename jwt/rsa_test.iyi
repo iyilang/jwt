@@ -1,0 +1,126 @@
+# RS256/384/512 and PS256/384/512: tokens signed here verify, tokens
+# OpenSSL signed verify, and the keys each side takes.
+module jwt/rsa_test
+
+import jwt
+import jwt/algorithms::{Algorithm}
+import jwt/errors::{InvalidKeyError, VerificationError}
+
+# `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048`, PKCS #8.
+PRIVATE = <<-PEM
+  -----BEGIN PRIVATE KEY-----
+  MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDGW9z54iA1c5KQ
+  BzM/vI5qzkPpE/XNH6ZEmy0E0Rxhik4bCFk32YEEnHXyr2LjEHsunv1z/7pYkEeB
+  EN5rPzXYdtUh4uul8NiD2faIUNRQYGejbpJ/s8dw0+PUAgmLiiGQHHI9VSFitOgM
+  P/hOhg0bUyGeb2wUexey4b3NbF/myfTqQpZl5bS9uL9lkiiTM87qlf7lA5BfSR12
+  cknVF1uiUfAoBM2cZ3bOIUPYpSHgJBLRe0ksmOEgdD2Jk8ZJQ5Os5+VaJzykfvvY
+  ak/nvaK05i5FP6UKke0jVsrxPPu6qXlcCm2NBT3XDM/smxMofdY74PhiZCOluf4d
+  vdidqYkxAgMBAAECggEAAYRDjB/a0PDr4QgD84k1yEf5jFCjvclBijZx60ziZ4s+
+  ftXHk2merehVLwo5ynYx+rNYwiBXSRhgGLLiwEHepuAZZToytpcPOBUzoT0c3c5o
+  dAKvt27jXwNhvhXeg3QNqYETSbSD3FIAbURUOfIIQN9/B5n329Ms1w9uHTA/bmpR
+  XOxERtTep+TIBtvtxnUvYV+5oDEM69ZUBBMqYNcuTU1TC49XA4UvZKCR6/5LbsqU
+  s1UP8vxW1TJrcekIws61gwIp+Fio7Oqihf212UC1qE0tvCiH7dR5naH3qtSVmL4R
+  mylK0BFsWFtIq4CcL4gmeMxRzqTXGOY04+YaTaJcuQKBgQDtVcWGdjfqxIk5hotC
+  TP8IHraN73TvvZxsv6drOIwuPrATns1GsBWQ6mwYSU2vnhnmtcu6foZSghb1CfVR
+  17PUxVrjXSTQjZMjkzoP0UNsehsTftz08E3U5P8iISN2fnW5oVM2TzTWedfAoKWq
+  XS7m8R3bLOsd6XYjPBXUKC5tOQKBgQDV9WPSHo/1a2uiaJ4zNl4vBWDB9GyPlrK0
+  TBFm4qVQv3ZJqvGntHubd82q0lG+Z+xGnm+TMlP1CdiqfylKe8B4jfx9Wm1DSWAO
+  0C8pVklFJVs5ihKFOz7Sckgmwz3hOZ64exXMY9/m9lASuDMvt1GhD8qPbiXGYnxt
+  ylnezWxzuQKBgQDIaGD/Bdx51bO6a640Mig4hxbIC6fGuWnZOoz4sStN8YllR/c2
+  9YGAeTMF3wBGh05/zotV03lBOrCAAgSxM1+bD3uL+h8YLDRPGgcxTBePBhzO/ZU/
+  D5vpZeU6wJjdejOWqG9HsOKBKSnSctTxYvYz9O6tIOT4wScM4bPdDoEFoQKBgEqf
+  CA57fEfjDCobhLllx9lsbb+XiNlXfMInGZahi3irHg05YojUCJxDX2apbbsTsbM7
+  hLx4vBFlOrzUFsmUeZ9SHfJ2PE9QYwEnmJs5LdrA2Z0qy6TN8e4hz4o9Y/KOTw4W
+  V5buamO6Glk9BxUoQX8D6+i0SNZ0+OKtxURQrvd5AoGASqhHeYTrNWz2z/d6GMUi
+  AzDsU8XhqwXmTXL8oL6mdzsW9wkLs7I8eLTiwFKXi47L2EB5VcSHinUiNhzdhvQK
+  JRVUl4Cmjp+c0gXEFqp7boKGLxsL2anIPj/35v9OtuirSYORxVq6Gy7tHKSGQvgZ
+  bqf2hFbhWGlf/ESmAjdU3Ro=
+  -----END PRIVATE KEY-----
+  PEM
+
+# Its public half, as `openssl rsa -pubout` writes it (SubjectPublicKeyInfo).
+PUBLIC = <<-PEM
+  -----BEGIN PUBLIC KEY-----
+  MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxlvc+eIgNXOSkAczP7yO
+  as5D6RP1zR+mRJstBNEcYYpOGwhZN9mBBJx18q9i4xB7Lp79c/+6WJBHgRDeaz81
+  2HbVIeLrpfDYg9n2iFDUUGBno26Sf7PHcNPj1AIJi4ohkBxyPVUhYrToDD/4ToYN
+  G1Mhnm9sFHsXsuG9zWxf5sn06kKWZeW0vbi/ZZIokzPO6pX+5QOQX0kddnJJ1Rdb
+  olHwKATNnGd2ziFD2KUh4CQS0XtJLJjhIHQ9iZPGSUOTrOflWic8pH772GpP572i
+  tOYuRT+lCpHtI1bK8Tz7uql5XAptjQU91wzP7JsTKH3WO+D4YmQjpbn+Hb3YnamJ
+  MQIDAQAB
+  -----END PUBLIC KEY-----
+  PEM
+
+# The same, as `openssl rsa -RSAPublicKey_out` writes it (PKCS #1).
+PUBLIC_PKCS1 = <<-PEM
+  -----BEGIN RSA PUBLIC KEY-----
+  MIIBCgKCAQEAxlvc+eIgNXOSkAczP7yOas5D6RP1zR+mRJstBNEcYYpOGwhZN9mB
+  BJx18q9i4xB7Lp79c/+6WJBHgRDeaz812HbVIeLrpfDYg9n2iFDUUGBno26Sf7PH
+  cNPj1AIJi4ohkBxyPVUhYrToDD/4ToYNG1Mhnm9sFHsXsuG9zWxf5sn06kKWZeW0
+  vbi/ZZIokzPO6pX+5QOQX0kddnJJ1RdbolHwKATNnGd2ziFD2KUh4CQS0XtJLJjh
+  IHQ9iZPGSUOTrOflWic8pH772GpP572itOYuRT+lCpHtI1bK8Tz7uql5XAptjQU9
+  1wzP7JsTKH3WO+D4YmQjpbn+Hb3YnamJMQIDAQAB
+  -----END RSA PUBLIC KEY-----
+  PEM
+
+# A 1024-bit public key, under RFC 7518's floor.
+PUBLIC_1024 = <<-PEM
+  -----BEGIN PUBLIC KEY-----
+  MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC6Cgkk+AgS/Pe5n0q8fsgvz4gp
+  Dhaw2mcU6t4xoAvmMeIBaAiY0EMgSCkjc4vRZ9m2liRZMxrYJEj6uTURCW2MFwcF
+  7sRA41/B7OHAnT67PKlJerjLvPY4MvHeJ6CO/zkypmexRENI6wgBGgTLxYJdg/GF
+  ABwVY0PpDry2OPCmMQIDAQAB
+  -----END PUBLIC KEY-----
+  PEM
+
+# P-256, for the refusal of a key of the wrong kind.
+EC_PUBLIC = <<-PEM
+  -----BEGIN PUBLIC KEY-----
+  MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEWWXgyR0aVz57hI6egnz/BshXtVr4
+  JepP4YIPbfUZA2xc32I6fKkQHBFzGX4At7PHVOp1FEbzR4BvibEGJRjnQA==
+  -----END PUBLIC KEY-----
+  PEM
+
+ALGORITHMS = [Algorithm::RS256, Algorithm::RS384, Algorithm::RS512, Algorithm::PS256, Algorithm::PS384, Algorithm::PS512]
+
+test "a token signed here verifies with the public key in either form, or the private key" do
+  ALGORITHMS.each do |algorithm|
+    token = Jwt.encode({"foo" => "bar"}, PRIVATE, algorithm).or_panic
+    [PUBLIC, PUBLIC_PKCS1, PRIVATE].each do |key|
+      decoded = Jwt.decode(token, key, algorithm).or_panic
+      assert_eq "bar", decoded.payload["foo"].as_s
+      assert_eq algorithm.to_s, decoded.header["alg"].as_s
+    end
+  end
+end
+
+test "tokens OpenSSL signed verify" do
+  # `openssl dgst -sha256 -sign` over the first two segments.
+  rs256 = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJvcGVuc3NsIn0.M6kkV3_6YQgKpOufvIojQo6ppzuQ-fvoZlOckg1e9pnJLSoNVCTs-8hdI5tbcz3cuWc62u9YmCir9YVls1cD6vacBfiUrz8ExhDBypNdfoXMlXJ3xPjAfOLA07nZwQAlgoOtPT5n00nGHZSIkaskhNsa4uR92qTfezXG2ySKIl19f3uZvxF3A9i26Jzua38HOKoDthA27-kYAg8Xkdu4ynOCEGUNabe0OOGLrwAAnBgzMFXzWHfi3p1oA7IANj-8NywVJxNiD0LwzpmdK4sTJCslfOzz6hKk56XZDI3WcqkOCLvPuxb0vtGXrJ-ix7iJ5gX3O2zlbRRkZRpCZVAccA"
+  assert_eq "openssl", Jwt.decode(rs256, PUBLIC, Algorithm::RS256).or_panic.payload["sub"].as_s
+  # `openssl dgst -sha384 -sigopt rsa_padding_mode:pss -sigopt rsa_pss_saltlen:digest -sign`.
+  ps384 = "eyJhbGciOiJQUzM4NCIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJvcGVuc3NsIn0.PU5HWC8nZKPVWZyqgMR3NZ3BQ2dqFi8s-OoIwvC3T_nYv3UDxA0Z8fK_o14IfFxlDNsESdtXZR1gMeRV7DnmWVU16HuHAGTZPdIAk0LIuokEEbkcQoo6AEmkI8fzHpukNy61PiGJkFafjZVn_Uthl8CJ1yOLb5nDr4mqrjKj0xEi7VzYGQV8r4ZeW-6axW1ReryRERbc11k-mVGycGBzdc6rllYdHFUdWCrqko0W4SyyfL3JAAddZDge-1i8fPKZebyrtm0LuhI0KOpLS-Xl7bNIfmoQBQEplamZ_MayAMgQ38ZwubjUlRZCSNfY5yyj_l9v3Q_hRhkg0vU376Y_cw"
+  assert_eq "openssl", Jwt.decode(ps384, PUBLIC_PKCS1, Algorithm::PS384).or_panic.payload["sub"].as_s
+end
+
+test "a token altered after signing is refused" do
+  token = Jwt.encode({"admin" => false}, PRIVATE, Algorithm::RS256).or_panic
+  parts = token.split('.')
+  altered = Jwt.encode({"admin" => true}, PRIVATE, Algorithm::RS256).or_panic.split('.')[1]
+  refusal = assert_error(VerificationError) { Jwt.decode("#{parts[0]}.#{altered}.#{parts[2]}", PUBLIC, Algorithm::RS256) }
+  assert_eq "Signature verification failed", refusal.message
+  # RS256 and PS256 signatures are not each other's.
+  ps = Jwt.encode({"admin" => false}, PRIVATE, Algorithm::PS256).or_panic.split('.')
+  rs_header = parts[0]
+  assert_error(VerificationError) { Jwt.decode("#{rs_header}.#{ps[1]}.#{ps[2]}", PUBLIC, Algorithm::RS256) }
+end
+
+test "keys the RSA algorithms do not take" do
+  token = Jwt.encode({"foo" => "bar"}, PRIVATE, Algorithm::RS256).or_panic
+  short = assert_error(InvalidKeyError) { Jwt.decode(token, PUBLIC_1024, Algorithm::RS256) }
+  assert_eq "a 1024-bit RSA key; RFC 7518 requires 2048 bits or more", short.message
+  assert_error(InvalidKeyError) { Jwt.decode(token, EC_PUBLIC, Algorithm::RS256) }
+  assert_error(InvalidKeyError) { Jwt.decode(token, "secret", Algorithm::RS256) }
+  assert_error(InvalidKeyError) { Jwt.encode({"foo" => "bar"}, PUBLIC, Algorithm::RS256) }
+  assert_error(InvalidKeyError) { Jwt.encode({"foo" => "bar"}, "secret", Algorithm::PS256) }
+end

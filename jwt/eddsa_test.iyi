@@ -1,0 +1,79 @@
+# EdDSA over Ed25519 (RFC 8037): RFC 8037's own example, keys in hex and
+# in PEM, and the one key a verifier must never derive.
+module jwt/eddsa_test
+
+import jwt
+import jwt/algorithms::{Algorithm}
+import jwt/base64url::{Base64Url}
+import jwt/errors::{InvalidKeyError, VerificationError}
+import jwt/signatures::{Signer}
+
+# RFC 8037 appendix A.1's key, which crystal-community/jwt's spec signs with.
+SEED   = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+PUBLIC = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+
+# `openssl genpkey -algorithm ed25519`, its public half, and the same two
+# as hex (`openssl pkey -text`).
+PEM_PRIVATE = <<-PEM
+  -----BEGIN PRIVATE KEY-----
+  MC4CAQAwBQYDK2VwBCIEIExj8ZYfT0mvbu6Y1RJwJBH7cBBQRRifcbJqvUyaQki1
+  -----END PRIVATE KEY-----
+  PEM
+
+PEM_PUBLIC = <<-PEM
+  -----BEGIN PUBLIC KEY-----
+  MCowBQYDK2VwAyEAEjQ3U5Itx+qyuk0iEKA5Zupb6B0NZRJ84y3tnBcLafQ=
+  -----END PUBLIC KEY-----
+  PEM
+
+PEM_SEED       = "4c63f1961f4f49af6eee98d512702411fb70105045189f71b26abd4c9a4248b5"
+PEM_PUBLIC_HEX = "12343753922dc7eab2ba4d2210a03966ea5be81d0d65127ce32ded9c170b69f4"
+
+test "RFC 8037 A.4: the example's signature, made and checked" do
+  input = "eyJhbGciOiJFZERTQSJ9.RXhhbXBsZSBvZiBFZDI1NTE5IHNpZ25pbmc"
+  expected = "hgyY0il_MGCjP0JzlnLWG1PPOt7-09PGcvMg3AIbQR6dWbhijcNR4ki4iylGjg5BhVsPt9g7sVvpAr_MuM0KAg"
+  signature = Signer.sign(Algorithm::EdDSA, SEED, input).or_panic
+  assert_eq expected, Base64Url.encode(signature)
+  assert_eq true, Signer.verify(Algorithm::EdDSA, PUBLIC, input, signature).or_panic
+  assert_eq true, Signer.verify(Algorithm::EdDSA, PUBLIC.upcase, input, signature).or_panic
+  assert_eq false, Signer.verify(Algorithm::EdDSA, PUBLIC, input + "x", signature).or_panic
+end
+
+test "a token signed with a seed verifies with its public key, hex or PEM either side" do
+  [{SEED, PUBLIC}, {PEM_SEED, PEM_PUBLIC}, {PEM_PRIVATE, PEM_PUBLIC_HEX}, {PEM_PRIVATE, PEM_PRIVATE}].each do |pair|
+    seed, public_key = pair
+    token = Jwt.encode({"foo" => "bar"}, seed, Algorithm::EdDSA).or_panic
+    decoded = Jwt.decode(token, public_key, Algorithm::EdDSA).or_panic
+    assert_eq "bar", decoded.payload["foo"].as_s
+    assert_eq "EdDSA", decoded.header["alg"].as_s
+  end
+  assert_eq Jwt.encode({"a" => 1}, PEM_SEED, Algorithm::EdDSA).or_panic, Jwt.encode({"a" => 1}, PEM_PRIVATE, Algorithm::EdDSA).or_panic
+end
+
+test "another key's signature is refused" do
+  token = Jwt.encode({"foo" => "bar"}, "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb", Algorithm::EdDSA).or_panic
+  refusal = assert_error(VerificationError) { Jwt.decode(token, PUBLIC, Algorithm::EdDSA) }
+  assert_eq "Signature verification failed", refusal.message
+end
+
+test "hex is the public key, never a seed to derive one from" do
+  # Anyone can sign with the public key's bytes as a seed. A verifier that
+  # also tried its hex as a seed would accept this token.
+  forged = Jwt.encode({"admin" => true}, PUBLIC, Algorithm::EdDSA).or_panic
+  assert_error(VerificationError) { Jwt.decode(forged, PUBLIC, Algorithm::EdDSA) }
+end
+
+test "text that is not an Ed25519 key" do
+  refusal = assert_error(InvalidKeyError) { Jwt.encode({"a" => 1}, "abcd", Algorithm::EdDSA) }
+  assert_eq "not an Ed25519 private key: expected 64 hex digits or a PEM block, got 4 characters", refusal.message
+  digits = assert_error(InvalidKeyError) { Jwt.encode({"a" => 1}, "zz" + SEED[2, 62], Algorithm::EdDSA) }
+  assert_eq %(not an Ed25519 private key: "zz" is not a hex byte), digits.message
+  token = Jwt.encode({"a" => 1}, SEED, Algorithm::EdDSA).or_panic
+  rsa = <<-PEM
+    -----BEGIN PUBLIC KEY-----
+    MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEWWXgyR0aVz57hI6egnz/BshXtVr4
+    JepP4YIPbfUZA2xc32I6fKkQHBFzGX4At7PHVOp1FEbzR4BvibEGJRjnQA==
+    -----END PUBLIC KEY-----
+    PEM
+  assert_error(InvalidKeyError) { Jwt.decode(token, rsa, Algorithm::EdDSA) }
+end
