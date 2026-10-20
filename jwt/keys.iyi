@@ -1,0 +1,219 @@
+# The keys a token is signed and verified with, read from the text
+# crystal-community/jwt takes them as: PEM for RSA and ECDSA, hex or PEM for
+# Ed25519. Each reader answers the key or why the text is not one.
+module jwt/keys
+
+import std/asn1::{Asn1Error, Der, DerValue}
+import std/curve25519::{CurveError, Ed25519, Ed25519PublicKey}
+import std/ecdsa::{EcdsaCurve, EcdsaError, EcdsaPublicKey}
+import std/p256::{P256PrivateKey}
+import std/rsa::{RsaError, RsaPrivateKey, RsaPublicKey}
+import std/text
+import std/x509::{X509, X509Error}
+import jwt/errors::{InvalidKeyError}
+
+# The smallest modulus RFC 7518 §3.3 allows.
+RSA_MIN_BITS = 2048
+
+ED25519_OID   = "1.3.101.112"
+EC_PUBLIC_OID = "1.2.840.10045.2.1"
+
+pub struct KeyReader
+  # An RSA private key: a `RSA PRIVATE KEY` (PKCS #1) or `PRIVATE KEY`
+  # (PKCS #8) PEM block, of at least 2048 bits.
+  def self.rsa_private(pem : String) : RsaPrivateKey | InvalidKeyError
+    key = RsaPrivateKey.from_pem(pem)
+    return InvalidKeyError.new("not an RSA private key: #{key.message}") if key.is_a?(RsaError)
+    KeyReader.rsa_size(key.bits)!
+    key
+  end
+
+  # An RSA public key: a `PUBLIC KEY` (SubjectPublicKeyInfo) or `RSA PUBLIC
+  # KEY` (PKCS #1) PEM block, or a private key's public half, of at least
+  # 2048 bits.
+  def self.rsa_public(pem : String) : RsaPublicKey | InvalidKeyError
+    if spki = KeyReader.pem_block(pem, "PUBLIC KEY")!
+      key = RsaPublicKey.from_spki(spki)
+    elsif pkcs1 = KeyReader.pem_block(pem, "RSA PUBLIC KEY")!
+      key = RsaPublicKey.from_pkcs1(pkcs1)
+    elsif pem.includes?("PRIVATE KEY-----")
+      return KeyReader.rsa_private(pem)!.public_key
+    else
+      return InvalidKeyError.new("not an RSA public key: no PUBLIC KEY, RSA PUBLIC KEY or private key PEM block")
+    end
+    return InvalidKeyError.new("not an RSA public key: #{key.message}") if key.is_a?(RsaError)
+    KeyReader.rsa_size(key.bits)!
+    key
+  end
+
+  # A P-256 private key: a `PRIVATE KEY` (PKCS #8) or `EC PRIVATE KEY`
+  # (SEC 1) PEM block.
+  def self.p256_private(pem : String) : P256PrivateKey | InvalidKeyError
+    if pkcs8 = KeyReader.pem_block(pem, "PRIVATE KEY")!
+      key = P256PrivateKey.from_pkcs8(pkcs8)
+    elsif sec1 = KeyReader.pem_block(pem, "EC PRIVATE KEY")!
+      key = P256PrivateKey.from_sec1(sec1)
+    else
+      return InvalidKeyError.new("not a P-256 private key: no PRIVATE KEY or EC PRIVATE KEY PEM block")
+    end
+    return InvalidKeyError.new("not a P-256 private key: #{key.message}") if key.is_a?(EcdsaError)
+    key
+  end
+
+  # An ECDSA public key on *curve*: a `PUBLIC KEY` PEM block, or the public
+  # key a `PRIVATE KEY` or `EC PRIVATE KEY` block carries beside its secret,
+  # as every key OpenSSL writes does.
+  def self.ec_public(pem : String, curve : EcdsaCurve) : EcdsaPublicKey | InvalidKeyError
+    if spki = KeyReader.pem_block(pem, "PUBLIC KEY")!
+      key = EcdsaPublicKey.from_spki(spki)
+    elsif pkcs8 = KeyReader.pem_block(pem, "PRIVATE KEY")!
+      key = KeyReader.asn1(KeyReader.ec_point_of_pkcs8(pkcs8))
+    elsif sec1 = KeyReader.pem_block(pem, "EC PRIVATE KEY")!
+      key = KeyReader.asn1(KeyReader.ec_point_of_sec1(sec1, nil))
+    else
+      return InvalidKeyError.new("not an EC public key: no PUBLIC KEY, PRIVATE KEY or EC PRIVATE KEY PEM block")
+    end
+    return key if key.is_a?(InvalidKeyError)
+    return InvalidKeyError.new("not an EC public key: #{key.message}") if key.is_a?(EcdsaError)
+    unless key.curve == curve
+      return InvalidKeyError.new("an EC key on #{key.curve}, where the algorithm takes #{curve}")
+    end
+    key
+  end
+
+  # An Ed25519 private key's 32-byte seed: 64 hex digits, as
+  # crystal-community/jwt takes it, or a `PRIVATE KEY` (PKCS #8, RFC 8410)
+  # PEM block.
+  def self.ed25519_seed(key : String) : Array(UInt8) | InvalidKeyError
+    if pkcs8 = KeyReader.pem_block(key, "PRIVATE KEY")!
+      return KeyReader.asn1(KeyReader.ed25519_seed_of_pkcs8(pkcs8))!
+    end
+    KeyReader.hex32(key, "an Ed25519 private key")
+  end
+
+  # An Ed25519 public key: 64 hex digits of the public key, a `PUBLIC KEY`
+  # (RFC 8410) PEM block, or a `PRIVATE KEY` block's public half.
+  #
+  # Hex is always the public key, never a seed to derive one from: a
+  # verifier that also tried its public key as a seed would accept a token
+  # signed by anyone holding that public key - everyone.
+  def self.ed25519_public(key : String) : Ed25519PublicKey | InvalidKeyError
+    if spki = KeyReader.pem_block(key, "PUBLIC KEY")!
+      bytes = KeyReader.asn1(KeyReader.ed25519_point_of_spki(spki))!
+    elsif pkcs8 = KeyReader.pem_block(key, "PRIVATE KEY")!
+      seed = KeyReader.asn1(KeyReader.ed25519_seed_of_pkcs8(pkcs8))!
+      bytes = Ed25519.public_key(seed).bytes
+    else
+      bytes = KeyReader.hex32(key, "an Ed25519 public key")!
+    end
+    public_key = Ed25519PublicKey.from_bytes(bytes)
+    return InvalidKeyError.new("not an Ed25519 public key: #{public_key.message}") if public_key.is_a?(CurveError)
+    public_key
+  end
+
+  # The DER of the first *label* block in *text*, nil when it has none.
+  def self.pem_block(text : String, label : String) : Array(UInt8)? | InvalidKeyError
+    blocks = X509.pem(text, label)
+    return InvalidKeyError.new("an unreadable PEM block: #{blocks.message}") if blocks.is_a?(X509Error)
+    blocks.first?
+  end
+
+  def self.rsa_size(bits : Int32) : Nil | InvalidKeyError
+    return InvalidKeyError.new("a #{bits}-bit RSA key; RFC 7518 requires 2048 bits or more") if bits < RSA_MIN_BITS
+    nil
+  end
+
+  # 32 bytes written as 64 hex digits, either case.
+  def self.hex32(text : String, what : String) : Array(UInt8) | InvalidKeyError
+    unless text.bytesize == 64
+      return InvalidKeyError.new("not #{what}: expected 64 hex digits or a PEM block, got #{text.bytesize} characters")
+    end
+    bytes = Array(UInt8).new(32, 0_u8)
+    src = text.to_unsafe
+    i = 0
+    while i < 32
+      high = KeyReader.hex_digit(src[2 * i])
+      low = KeyReader.hex_digit(src[2 * i + 1])
+      return InvalidKeyError.new("not #{what}: #{text[2 * i, 2].inspect} is not a hex byte") if high < 0 || low < 0
+      bytes[i] = (high * 16 + low).to_u8
+      i = i + 1
+    end
+    bytes
+  end
+
+  def self.hex_digit(byte : UInt8) : Int32
+    if byte >= 48_u8 && byte <= 57_u8
+      (byte - 48_u8).to_i32
+    elsif byte >= 97_u8 && byte <= 102_u8
+      (byte - 87_u8).to_i32
+    elsif byte >= 65_u8 && byte <= 70_u8
+      (byte - 55_u8).to_i32
+    else
+      -1
+    end
+  end
+
+  # A DER reader's refusal as a key's.
+  def self.asn1(answer : T | Asn1Error) : T | InvalidKeyError forall T
+    return InvalidKeyError.new("not a key: #{answer.message}") if answer.is_a?(Asn1Error)
+    answer
+  end
+
+  # PKCS #8 (RFC 5958): SEQUENCE { version, AlgorithmIdentifier
+  # { id-ecPublicKey, namedCurve }, OCTET STRING { ECPrivateKey } }.
+  def self.ec_point_of_pkcs8(der : Array(UInt8)) : EcdsaPublicKey | EcdsaError | Asn1Error
+    fields = Der.parse(der)!.sequence!
+    return EcdsaError.new("a PKCS #8 key of #{fields.size} fields") if fields.size < 3
+    algorithm = fields[1].sequence!
+    return EcdsaError.new("a PKCS #8 key with no curve") if algorithm.size < 2
+    oid = algorithm[0].oid!
+    return EcdsaError.new("a PKCS #8 key of algorithm #{oid}, not id-ecPublicKey") unless oid == EC_PUBLIC_OID
+    curve_oid = algorithm[1].oid!
+    curve = EcdsaCurve.from_oid(curve_oid)
+    return EcdsaError.new("a key on the curve #{curve_oid}, which is not P-256, P-384 or P-521") unless curve
+    ec_point_of_sec1(fields[2].octet_string!, curve)
+  end
+
+  # SEC 1's ECPrivateKey (RFC 5915): SEQUENCE { version 1, privateKey,
+  # [0] parameters OPTIONAL, [1] publicKey OPTIONAL }. The curve is
+  # *curve* when PKCS #8 named it outside, else [0]'s.
+  def self.ec_point_of_sec1(der : Array(UInt8), curve : EcdsaCurve?) : EcdsaPublicKey | EcdsaError | Asn1Error
+    fields = Der.parse(der)!.sequence!
+    named = curve
+    point = nil
+    fields.each do |field|
+      if field.context?(0)
+        curve_oid = field.explicit(0)!.oid!
+        named = EcdsaCurve.from_oid(curve_oid)
+        return EcdsaError.new("a key on the curve #{curve_oid}, which is not P-256, P-384 or P-521") unless named
+      elsif field.context?(1)
+        point = field.explicit(1)!.bit_string!
+      end
+    end
+    return EcdsaError.new("an EC private key that names no curve") unless named
+    return EcdsaError.new("an EC private key without its public key") unless point
+    EcdsaPublicKey.from_point(named, point)
+  end
+
+  # PKCS #8 for Ed25519 (RFC 8410 §7): SEQUENCE { version,
+  # AlgorithmIdentifier { id-Ed25519 }, OCTET STRING { OCTET STRING seed } }.
+  def self.ed25519_seed_of_pkcs8(der : Array(UInt8)) : Array(UInt8) | InvalidKeyError | Asn1Error
+    fields = Der.parse(der)!.sequence!
+    return InvalidKeyError.new("a PKCS #8 key of #{fields.size} fields") if fields.size < 3
+    oid = fields[1].sequence!.first.oid!
+    return InvalidKeyError.new("a PKCS #8 key of algorithm #{oid}, not Ed25519") unless oid == ED25519_OID
+    seed = Der.parse(fields[2].octet_string!)!.octet_string!
+    return InvalidKeyError.new("an Ed25519 seed of #{seed.size} bytes, not 32") unless seed.size == 32
+    seed
+  end
+
+  # SubjectPublicKeyInfo for Ed25519 (RFC 8410 §4): SEQUENCE {
+  # AlgorithmIdentifier { id-Ed25519 }, BIT STRING key }.
+  def self.ed25519_point_of_spki(der : Array(UInt8)) : Array(UInt8) | InvalidKeyError | Asn1Error
+    fields = Der.parse(der)!.sequence!
+    return InvalidKeyError.new("a public key of #{fields.size} fields") unless fields.size == 2
+    oid = fields[0].sequence!.first.oid!
+    return InvalidKeyError.new("a public key of algorithm #{oid}, not Ed25519") unless oid == ED25519_OID
+    fields[1].bit_string!
+  end
+end
