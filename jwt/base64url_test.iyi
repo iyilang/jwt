@@ -1,0 +1,32 @@
+# Unpadded base64url, both ways, and what a token segment may not be.
+module jwt/base64url_test
+
+import jwt/base64url::{Base64Url}
+
+test "every tail length round-trips, without padding" do
+  assert_eq "", Base64Url.encode("")
+  assert_eq "_w", Base64Url.encode("\xFF")
+  assert_eq "_-8", Base64Url.encode("\xFF\xEF")
+  assert_eq "-_7_", Base64Url.encode("\xFB\xFE\xFF")
+  ["", "f", "fo", "foo", "foob", "fooba", "foobar", "\x00\xFF\x10\x80"].each do |text|
+    assert_eq text, Base64Url.decode(Base64Url.encode(text))
+  end
+end
+
+test "bytes encode as the text they spell" do
+  assert_eq "AAH_", Base64Url.encode([0_u8, 1_u8, 255_u8])
+  assert_eq [0_u8, 1_u8, 255_u8], Base64Url.decode_bytes("AAH_")
+end
+
+test "what is not unpadded base64url is refused" do
+  assert_nil Base64Url.decode("Zg=="), "padding"
+  assert_nil Base64Url.decode("Zm9v+A"), "the standard alphabet's +"
+  assert_nil Base64Url.decode("Zm9v/A"), "the standard alphabet's /"
+  assert_nil Base64Url.decode("Zm9 v"), "whitespace"
+  assert_nil Base64Url.decode("Zm9vY"), "a length of 1 more than a multiple of 4"
+  # "Zh" and "Zg" would both be "f" if the leftover bits were ignored.
+  assert_eq "f", Base64Url.decode("Zg")
+  assert_nil Base64Url.decode("Zh"), "set bits past the last byte"
+  assert_eq "fo", Base64Url.decode("Zm8")
+  assert_nil Base64Url.decode("Zm9"), "set bits past the last byte"
+end
