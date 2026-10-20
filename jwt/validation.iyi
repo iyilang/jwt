@@ -1,0 +1,82 @@
+# The registered claims a decoder checks (RFC 7519 §4.1) and the header's
+# `typ` (§5.1), each against what the caller asked for.
+module jwt/validation
+
+import std/json::{Any}
+import jwt/errors::{DecodeError, ExpiredSignatureError, ImmatureSignatureError, InvalidAudienceError}
+import jwt/errors::{InvalidIssuerError, InvalidSubjectError, InvalidTypeError, ValidationError}
+
+pub struct Claims
+  # `exp` and `nbf` when the payload has them, at *now* in seconds since the
+  # epoch; `aud`, `iss` and `sub` when the caller names the value expected.
+  # A time claim that is not a number is a malformed token, not an expired
+  # one.
+  def self.validate(payload : Hash(String, Any), now : Float64, aud : String?, iss : String?, sub : String?) : Nil | DecodeError | ValidationError
+    if exp = payload["exp"]?
+      expires = Claims.numeric_date(exp, "exp")!
+      return ExpiredSignatureError.new("Signature is expired") if now >= expires
+    end
+    if nbf = payload["nbf"]?
+      starts = Claims.numeric_date(nbf, "nbf")!
+      return ImmatureSignatureError.new("Signature nbf has not been reached") if now < starts
+    end
+    if expected = aud
+      Claims.audience(payload["aud"]?, expected)!
+    end
+    if expected = iss
+      found = payload["iss"]?
+      unless found && found.as_s? == expected
+        return InvalidIssuerError.new("Invalid issuer (iss). Expected #{expected.inspect}, received #{Claims.describe(found)}")
+      end
+    end
+    if expected = sub
+      found = payload["sub"]?
+      unless found && found.as_s? == expected
+        return InvalidSubjectError.new("Invalid subject (sub). Expected #{expected.inspect}, received #{Claims.describe(found)}")
+      end
+    end
+    nil
+  end
+
+  # The header's `typ` against *expected*, ignoring case: it is a media
+  # type, and those are case-insensitive (RFC 7515 §4.1.9).
+  def self.check_type(header : Hash(String, Any), expected : String) : Nil | InvalidTypeError
+    found = header["typ"]?
+    typ = found ? found.as_s? : nil
+    unless typ && typ.downcase == expected.downcase
+      return InvalidTypeError.new("Invalid type (typ). Expected #{expected.inspect}, received #{Claims.describe(found)}")
+    end
+    nil
+  end
+
+  # `aud` is one string or an array of them (RFC 7519 §4.1.3); *expected*
+  # has to be the one, or one of them.
+  def self.audience(found : Any?, expected : String) : Nil | InvalidAudienceError
+    unless found
+      return InvalidAudienceError.new("Invalid audience (aud). Expected #{expected.inspect}, received nothing")
+    end
+    if one = found.as_s?
+      return nil if one == expected
+    elsif many = found.as_a?
+      unless many.all? { |item| !item.as_s?.nil? }
+        return InvalidAudienceError.new("aud claim must be a string or array of strings")
+      end
+      return nil if many.any? { |item| item.as_s? == expected }
+    else
+      return InvalidAudienceError.new("aud claim must be a string or array of strings")
+    end
+    InvalidAudienceError.new("Invalid audience (aud). Expected #{expected.inspect}, received #{found.to_json}")
+  end
+
+  # A NumericDate (RFC 7519 §2): seconds since the epoch, an integer or not.
+  def self.numeric_date(value : Any, name : String) : Float64 | DecodeError
+    seconds = value.as_f?
+    return DecodeError.new("Invalid #{name} claim: expected a NumericDate, received #{value.kind}") unless seconds
+    seconds
+  end
+
+  # A claim as an error message shows it: its JSON, or `nothing`.
+  def self.describe(value : Any?) : String
+    value ? value.to_json : "nothing"
+  end
+end
