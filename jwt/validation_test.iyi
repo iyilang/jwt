@@ -1,0 +1,86 @@
+# The registered claims and `typ`, checked by `decode` once the signature
+# holds.
+module jwt/validation_test
+
+import std/json::{Any}
+import std/time::{Time}
+import jwt
+import jwt/algorithms::{Algorithm}
+import jwt/errors::{DecodeError, ExpiredSignatureError, ImmatureSignatureError, InvalidAudienceError}
+import jwt/errors::{InvalidIssuerError, InvalidSubjectError, InvalidTypeError}
+import jwt/validation::{Claims}
+
+def sign(payload : Hash(String, Any)) : String
+  Jwt.encode(payload, "k", Algorithm::HS256).or_panic
+end
+
+def now : Int64
+  Time.utc.to_unix
+end
+
+test "exp: accepted before it, refused from it on" do
+  assert_ok { Jwt.decode(sign({"exp" => Any.new(now + 60)}), "k", Algorithm::HS256) }
+  expired = assert_error(ExpiredSignatureError) { Jwt.decode(sign({"exp" => Any.new(now - 1)}), "k", Algorithm::HS256) }
+  assert_eq "Signature is expired", expired.message
+  # The moment itself: RFC 7519 §4.1.4, "on or after which".
+  assert_error(ExpiredSignatureError) { Claims.validate({"exp" => Any.new(100_i64)}, 100.0, nil, nil, nil) }
+  assert_nil Claims.validate({"exp" => Any.new(100.5)}, 100.0, nil, nil, nil)
+end
+
+test "nbf: refused before it, accepted from it on" do
+  assert_ok { Jwt.decode(sign({"nbf" => Any.new(now - 1)}), "k", Algorithm::HS256) }
+  early = assert_error(ImmatureSignatureError) { Jwt.decode(sign({"nbf" => Any.new(now + 60)}), "k", Algorithm::HS256) }
+  assert_eq "Signature nbf has not been reached", early.message
+  assert_nil Claims.validate({"nbf" => Any.new(100_i64)}, 100.0, nil, nil, nil)
+end
+
+test "a time claim that is not a number is a malformed token" do
+  refusal = assert_error(DecodeError) { Jwt.decode(sign({"exp" => Any.new("tomorrow")}), "k", Algorithm::HS256) }
+  assert_eq "Invalid exp claim: expected a NumericDate, received string", refusal.message
+  assert_error(DecodeError) { Jwt.decode(sign({"nbf" => Any.new(true)}), "k", Algorithm::HS256) }
+end
+
+test "validate: false checks the signature and nothing else" do
+  stale = sign({"exp" => Any.new(now - 60), "nbf" => Any.new(now + 60), "iss" => Any.new("me")})
+  assert_ok { Jwt.decode(stale, "k", Algorithm::HS256, validate: false, iss: "you") }
+  assert_error(ExpiredSignatureError) { Jwt.decode(stale, "k", Algorithm::HS256, iss: "you") }
+end
+
+test "aud: one string, or one of an array" do
+  one = sign({"aud" => Any.new("sergey")})
+  many = sign({"aud" => Any.new([Any.new("sergey"), Any.new("julia")])})
+  assert_ok { Jwt.decode(one, "k", Algorithm::HS256, aud: "sergey") }
+  assert_ok { Jwt.decode(many, "k", Algorithm::HS256, aud: "julia") }
+  # Not asked for, not checked.
+  assert_ok { Jwt.decode(many, "k", Algorithm::HS256) }
+  assert_eq %(Invalid audience (aud). Expected "max", received "sergey"),
+    assert_error(InvalidAudienceError) { Jwt.decode(one, "k", Algorithm::HS256, aud: "max") }.message
+  assert_eq %(Invalid audience (aud). Expected "max", received ["sergey","julia"]),
+    assert_error(InvalidAudienceError) { Jwt.decode(many, "k", Algorithm::HS256, aud: "max") }.message
+  assert_eq %(Invalid audience (aud). Expected "max", received nothing),
+    assert_error(InvalidAudienceError) { Jwt.decode(sign({"foo" => Any.new("bar")}), "k", Algorithm::HS256, aud: "max") }.message
+  assert_eq "aud claim must be a string or array of strings",
+    assert_error(InvalidAudienceError) { Jwt.decode(sign({"aud" => Any.new(1_i64)}), "k", Algorithm::HS256, aud: "1") }.message
+  assert_error(InvalidAudienceError) { Jwt.decode(sign({"aud" => Any.new([Any.new("max"), Any.new(1_i64)])}), "k", Algorithm::HS256, aud: "max") }
+end
+
+test "iss and sub: the string asked for" do
+  token = sign({"iss" => Any.new("me"), "sub" => Any.new("Esperanto")})
+  assert_ok { Jwt.decode(token, "k", Algorithm::HS256, iss: "me", sub: "Esperanto") }
+  assert_eq %(Invalid issuer (iss). Expected "you", received "me"),
+    assert_error(InvalidIssuerError) { Jwt.decode(token, "k", Algorithm::HS256, iss: "you") }.message
+  assert_eq %(Invalid subject (sub). Expected "Junularo", received "Esperanto"),
+    assert_error(InvalidSubjectError) { Jwt.decode(token, "k", Algorithm::HS256, sub: "Junularo") }.message
+  bare = sign({"foo" => Any.new("bar")})
+  assert_eq %(Invalid issuer (iss). Expected "me", received nothing),
+    assert_error(InvalidIssuerError) { Jwt.decode(bare, "k", Algorithm::HS256, iss: "me") }.message
+  assert_error(InvalidSubjectError) { Jwt.decode(bare, "k", Algorithm::HS256, sub: "x") }
+  assert_error(InvalidIssuerError) { Jwt.decode(sign({"iss" => Any.new(1_i64)}), "k", Algorithm::HS256, iss: "1") }
+end
+
+test "typ: the header's, ignoring case, checked even when claims are not" do
+  token = Jwt.encode({"foo" => "bar"}, "k", Algorithm::HS256, {"typ" => "at+jwt"}).or_panic
+  assert_ok { Jwt.decode(token, "k", Algorithm::HS256, typ: "AT+JWT") }
+  assert_eq %(Invalid type (typ). Expected "JWT", received "at+jwt"),
+    assert_error(InvalidTypeError) { Jwt.decode(token, "k", Algorithm::HS256, validate: false, typ: "JWT") }.message
+end
