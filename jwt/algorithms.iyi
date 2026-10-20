@@ -1,0 +1,27 @@
+# The signing algorithms of RFC 7518 §3 and RFC 8037 §3.1 a token can name.
+module jwt/algorithms
+
+# A JWS algorithm: `none`, HMAC, RSASSA-PKCS1-v1_5, RSASSA-PSS, ECDSA and
+# Ed25519. ES384 and ES512 verify only: iyi's library signs ECDSA on P-256
+# alone.
+pub enum Algorithm : Int32
+  None  =  0
+  HS256 =  1
+  HS384 =  2
+  HS512 =  3
+  RS256 =  4
+  RS384 =  5
+  RS512 =  6
+  PS256 =  7
+  PS384 =  8
+  PS512 =  9
+  ES256 = 10
+  ES384 = 11
+  ES512 = 12
+  EdDSA = 13
+
+  # The header's `alg`: `none` for `None`, the member's name for the rest.
+  def jose_name : String
+    self == Algorithm::None ? "none" : to_s
+  end
+end

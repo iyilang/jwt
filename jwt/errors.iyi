@@ -1,0 +1,200 @@
+# Every way encoding or decoding a token fails, as values (SPEC.md III.1):
+# crystal-community/jwt's exception classes, each a type that implements
+# `Error`, and the aliases that group them as its hierarchy did.
+module jwt/errors
+
+# The token is not a JWT: not three segments, a segment that is not
+# unpadded base64url, a header or a payload that is not a JSON object, a
+# registered claim of the wrong type, or a `crit` header naming extensions
+# this library does not implement.
+pub class DecodeError
+  getter reason : String
+
+  def initialize(@reason : String)
+  end
+
+  def to_s : String
+    @reason
+  end
+end
+
+impl Error for DecodeError
+  def message : String
+    @reason
+  end
+end
+
+# The signature is not the key's, or the token says it was signed with
+# another algorithm than the one it is being verified with.
+pub class VerificationError
+  getter reason : String
+
+  def initialize(@reason : String)
+  end
+
+  def to_s : String
+    @reason
+  end
+end
+
+impl Error for VerificationError
+  def message : String
+    @reason
+  end
+end
+
+# The key is not one the algorithm takes: a PEM block of the wrong kind, an
+# RSA key under 2048 bits, an EC key on another curve, an Ed25519 key that
+# is not 32 bytes.
+pub class InvalidKeyError
+  getter reason : String
+
+  def initialize(@reason : String)
+  end
+
+  def to_s : String
+    @reason
+  end
+end
+
+impl Error for InvalidKeyError
+  def message : String
+    @reason
+  end
+end
+
+# An algorithm iyi's library can verify but not sign with (ES384, ES512).
+pub class UnsupportedAlgorithmError
+  getter reason : String
+
+  def initialize(@reason : String)
+  end
+
+  def to_s : String
+    @reason
+  end
+end
+
+impl Error for UnsupportedAlgorithmError
+  def message : String
+    @reason
+  end
+end
+
+# The `exp` claim is now or in the past.
+pub class ExpiredSignatureError
+  getter reason : String
+
+  def initialize(@reason : String)
+  end
+
+  def to_s : String
+    @reason
+  end
+end
+
+impl Error for ExpiredSignatureError
+  def message : String
+    @reason
+  end
+end
+
+# The `nbf` claim is still in the future.
+pub class ImmatureSignatureError
+  getter reason : String
+
+  def initialize(@reason : String)
+  end
+
+  def to_s : String
+    @reason
+  end
+end
+
+impl Error for ImmatureSignatureError
+  def message : String
+    @reason
+  end
+end
+
+# The `aud` claim is missing, or names nobody the decoder was told it is.
+pub class InvalidAudienceError
+  getter reason : String
+
+  def initialize(@reason : String)
+  end
+
+  def to_s : String
+    @reason
+  end
+end
+
+impl Error for InvalidAudienceError
+  def message : String
+    @reason
+  end
+end
+
+# The `iss` claim is missing, or not the issuer asked for.
+pub class InvalidIssuerError
+  getter reason : String
+
+  def initialize(@reason : String)
+  end
+
+  def to_s : String
+    @reason
+  end
+end
+
+impl Error for InvalidIssuerError
+  def message : String
+    @reason
+  end
+end
+
+# The `sub` claim is missing, or not the subject asked for.
+pub class InvalidSubjectError
+  getter reason : String
+
+  def initialize(@reason : String)
+  end
+
+  def to_s : String
+    @reason
+  end
+end
+
+impl Error for InvalidSubjectError
+  def message : String
+    @reason
+  end
+end
+
+# The header's `typ` is missing, or not the type asked for.
+pub class InvalidTypeError
+  getter reason : String
+
+  def initialize(@reason : String)
+  end
+
+  def to_s : String
+    @reason
+  end
+end
+
+impl Error for InvalidTypeError
+  def message : String
+    @reason
+  end
+end
+
+# A claim the decoder was asked to check does not hold.
+pub alias ValidationError = ExpiredSignatureError | ImmatureSignatureError | InvalidAudienceError |
+                            InvalidIssuerError | InvalidSubjectError | InvalidTypeError
+
+# What `encode` can fail with.
+pub alias EncodeError = InvalidKeyError | UnsupportedAlgorithmError
+
+# What `decode` can fail with.
+pub alias Failure = DecodeError | VerificationError | InvalidKeyError | UnsupportedAlgorithmError | ValidationError
