@@ -1,0 +1,113 @@
+# JWS signatures (RFC 7518 §3, RFC 8037 §3.1): the bytes each algorithm
+# signs a token's first two segments into, and the check of them.
+module jwt/signatures
+
+import std/asn1::{Asn1Error, Der}
+import std/crypto::{HMAC, Subtle}
+import std/curve25519::{Ed25519}
+import std/digest::{SHA256, SHA384, SHA512}
+import std/ecdsa::{EcdsaCurve, EcdsaHash}
+import std/rsa::{RsaHash}
+import std/text
+import jwt/algorithms::{Algorithm}
+import jwt/errors::{EncodeError, InvalidKeyError, UnsupportedAlgorithmError}
+import jwt/keys::{KeyReader}
+
+pub struct Signer
+  # The signature of *data* under *key* with *algorithm*; empty for `None`.
+  # See `Keys` for the text each kind of key is written in.
+  def self.sign(algorithm : Algorithm, key : String, data : String) : Array(UInt8) | EncodeError
+    case algorithm
+    in Algorithm::None  then [] of UInt8
+    in Algorithm::HS256 then HMAC.digest(SHA256, key, data)
+    in Algorithm::HS384 then HMAC.digest(SHA384, key, data)
+    in Algorithm::HS512 then HMAC.digest(SHA512, key, data)
+    in Algorithm::RS256 then KeyReader.rsa_private(key)!.sign_pkcs1v15(RsaHash::SHA256, data)
+    in Algorithm::RS384 then KeyReader.rsa_private(key)!.sign_pkcs1v15(RsaHash::SHA384, data)
+    in Algorithm::RS512 then KeyReader.rsa_private(key)!.sign_pkcs1v15(RsaHash::SHA512, data)
+    in Algorithm::PS256 then KeyReader.rsa_private(key)!.sign_pss(RsaHash::SHA256, data)
+    in Algorithm::PS384 then KeyReader.rsa_private(key)!.sign_pss(RsaHash::SHA384, data)
+    in Algorithm::PS512 then KeyReader.rsa_private(key)!.sign_pss(RsaHash::SHA512, data)
+    in Algorithm::ES256
+      der = KeyReader.p256_private(key)!.sign(EcdsaHash::SHA256, data)
+      raw = Signer.der_to_raw(der, EcdsaCurve::P256.size)
+      raise "a P-256 signature std/p256 wrote is not DER: #{raw.message}" if raw.is_a?(Asn1Error)
+      raw
+    in Algorithm::ES384, Algorithm::ES512
+      UnsupportedAlgorithmError.new("#{algorithm} verifies but does not sign: iyi's std/ecdsa signs on P-256 alone")
+    in Algorithm::EdDSA then Ed25519.sign(KeyReader.ed25519_seed(key)!, data).bytes
+    end
+  end
+
+  # Whether *signature* is *key*'s signature of *data* with *algorithm*.
+  # `None` takes the empty signature alone.
+  def self.verify(algorithm : Algorithm, key : String, data : String, signature : Array(UInt8)) : Bool | InvalidKeyError
+    case algorithm
+    in Algorithm::None  then signature.empty?
+    in Algorithm::HS256 then Subtle.constant_time_compare(HMAC.digest(SHA256, key, data), signature)
+    in Algorithm::HS384 then Subtle.constant_time_compare(HMAC.digest(SHA384, key, data), signature)
+    in Algorithm::HS512 then Subtle.constant_time_compare(HMAC.digest(SHA512, key, data), signature)
+    in Algorithm::RS256 then KeyReader.rsa_public(key)!.verify_pkcs1v15(RsaHash::SHA256, data, signature)
+    in Algorithm::RS384 then KeyReader.rsa_public(key)!.verify_pkcs1v15(RsaHash::SHA384, data, signature)
+    in Algorithm::RS512 then KeyReader.rsa_public(key)!.verify_pkcs1v15(RsaHash::SHA512, data, signature)
+    in Algorithm::PS256 then KeyReader.rsa_public(key)!.verify_pss(RsaHash::SHA256, data, signature)
+    in Algorithm::PS384 then KeyReader.rsa_public(key)!.verify_pss(RsaHash::SHA384, data, signature)
+    in Algorithm::PS512 then KeyReader.rsa_public(key)!.verify_pss(RsaHash::SHA512, data, signature)
+    in Algorithm::ES256 then Signer.verify_ec(EcdsaCurve::P256, EcdsaHash::SHA256, key, data, signature)
+    in Algorithm::ES384 then Signer.verify_ec(EcdsaCurve::P384, EcdsaHash::SHA384, key, data, signature)
+    in Algorithm::ES512 then Signer.verify_ec(EcdsaCurve::P521, EcdsaHash::SHA512, key, data, signature)
+    in Algorithm::EdDSA then KeyReader.ed25519_public(key)!.verify(data, signature)
+    end
+  end
+
+  def self.verify_ec(curve : EcdsaCurve, hash : EcdsaHash, key : String, data : String, signature : Array(UInt8)) : Bool | InvalidKeyError
+    public_key = KeyReader.ec_public(key, curve)!
+    return false unless signature.size == 2 * curve.size
+    public_key.verify(hash, data, Signer.raw_to_der(signature))
+  end
+
+  # A JWS ECDSA signature (RFC 7518 §3.4) - r then s, big-endian, each
+  # half its bytes - as the DER of an Ecdsa-Sig-Value, SEQUENCE { r
+  # INTEGER, s INTEGER }, the form std/ecdsa verifies.
+  def self.raw_to_der(raw : Array(UInt8)) : Array(UInt8)
+    half = raw.size // 2
+    r = Signer.der_integer(raw[0, half])
+    s = Signer.der_integer(raw[half, half])
+    Signer.der_header(0x30_u8, r.size + s.size) + r + s
+  end
+
+  # An Ecdsa-Sig-Value's DER as a JWS signature: r and s each left-padded
+  # with zeros to *size* bytes.
+  def self.der_to_raw(der : Array(UInt8), size : Int32) : Array(UInt8) | Asn1Error
+    fields = Der.parse(der)!.sequence!
+    return Asn1Error.new("an ECDSA signature of #{fields.size} values, not 2", 0) unless fields.size == 2
+    raw = Array(UInt8).new(2 * size, 0_u8)
+    fields.each_with_index do |field, i|
+      number = field.unsigned_integer!
+      return Asn1Error.new("an ECDSA signature value of #{number.size} bytes, past #{size}", 0) if number.size > size
+      offset = i * size + size - number.size
+      number.each_with_index { |byte, k| raw[offset + k] = byte }
+    end
+    raw
+  end
+
+  # *magnitude*, a big-endian unsigned number, as a DER INTEGER: its leading
+  # zeros dropped, and one 0x00 put back where the first byte's high bit
+  # would read as a sign.
+  def self.der_integer(magnitude : Array(UInt8)) : Array(UInt8)
+    start = 0
+    while start < magnitude.size - 1 && magnitude[start] == 0_u8
+      start = start + 1
+    end
+    content = magnitude[start, magnitude.size - start]
+    content = [0_u8] + content if content.empty? || content[0] >= 0x80_u8
+    Signer.der_header(0x02_u8, content.size) + content
+  end
+
+  # A tag and a definite length, short form under 128, long form past it.
+  def self.der_header(tag : UInt8, length : Int32) : Array(UInt8)
+    return [tag, length.to_u8] if length < 0x80
+    return [tag, 0x81_u8, length.to_u8] if length < 0x100
+    [tag, 0x82_u8, (length >> 8).to_u8, (length & 255).to_u8]
+  end
+end
